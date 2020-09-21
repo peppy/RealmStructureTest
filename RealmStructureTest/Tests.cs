@@ -18,35 +18,8 @@ namespace RealmStructureTest
             performBasicRead(realm);
         }
 
-        /// <summary>
-        /// This tests an asynchronous realm query using IQueryable.
-        /// The callback will be run in the game thread context (on next realm.Refresh call).
-        /// </summary>
         [Test]
-        public void TestAsyncViaSubscription()
-        {
-            var game = new Game();
-
-            game.ScheduleRealm(realm =>
-            {
-                performBasicWrite(realm);
-
-                realm.All<BeatmapInfo>()
-                    .Where(o => true /* expensive lookup here */)
-                    .SubscribeForNotifications((sender, changes, error) =>
-                    {
-                        performBasicRead(realm);
-
-                        // scheduled to GameBase automatically.
-                        game.Exit();
-                    });
-            });
-
-            game.WaitForExit();
-        }
-
-        [Test]
-        public void TestFreezeFromOtherThread()
+        public void TestFreezeFromOtherThreadFails()
         {
             var realm = Game.GetRealmInstance();
             var reset = new ManualResetEventSlim();
@@ -76,7 +49,7 @@ namespace RealmStructureTest
         }
 
         [Test]
-        public async Task TestWriteWithAsyncOperationInBetween()
+        public async Task TestWriteWithAsyncOperationInBetweenFails()
         {
             var realm = Game.GetRealmInstance();
             Assert.Greater(realm.All<BeatmapInfo>().Count(), 0);
@@ -105,6 +78,44 @@ namespace RealmStructureTest
             Assert.NotNull(thrown);
         }
 
+        /// <summary>
+        /// This tests an asynchronous realm query using IQueryable.
+        /// The callback will be run in the game thread context (on next realm.Refresh call).
+        /// </summary>
+        [Test]
+        public void TestAsyncViaSubscription()
+        {
+            var game = new Game();
+
+            game.ScheduleRealm(realm =>
+            {
+                performBasicWrite(realm);
+
+                realm.All<BeatmapInfo>()
+                    .Where(o => true /* expensive lookup here */)
+                    .SubscribeForNotifications((sender, changes, error) =>
+                    {
+                        performBasicRead(realm);
+
+                        // scheduled to GameBase automatically.
+                        game.Exit();
+                    });
+            });
+
+            game.WaitForExit();
+        }
+
+        private void performBulkWrite(Realm realm, int count = 100000)
+        {
+            var transaction = realm.BeginWrite();
+            
+            for (int i = 0; i < count; i++)
+                realm.Add(new BeatmapInfo($"test-{count}"));
+            
+            transaction.Commit();
+            realm.Refresh();
+        }
+
         private void performBasicWrite(Realm realm)
         {
             var transaction = realm.BeginWrite();
@@ -112,7 +123,6 @@ namespace RealmStructureTest
             transaction.Commit();
             realm.Refresh();
         }
-
 
         private void performBasicRead(Realm realm)
         {
