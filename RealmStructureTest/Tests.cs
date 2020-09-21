@@ -29,11 +29,17 @@ namespace RealmStructureTest
 
             game.ScheduleRealm(realm =>
             {
-                realm.All<BeatmapInfo>().Where(o => true /* expensive lookup */).SubscribeForNotifications((sender, changes, error) =>
-                {
-                    // scheduled to GameBase automatically.
-                    game.Exit();
-                });
+                performBasicWrite(realm);
+
+                realm.All<BeatmapInfo>()
+                    .Where(o => true /* expensive lookup here */)
+                    .SubscribeForNotifications((sender, changes, error) =>
+                    {
+                        performBasicRead(realm);
+
+                        // scheduled to GameBase automatically.
+                        game.Exit();
+                    });
             });
 
             game.WaitForExit();
@@ -83,7 +89,7 @@ namespace RealmStructureTest
             });
 
             Exception thrown = null;
-            
+
             try
             {
                 // as a result, this will throw.
@@ -140,8 +146,10 @@ namespace RealmStructureTest
     public class Game
     {
         private readonly ConcurrentStack<Action> scheduledActions = new ConcurrentStack<Action>();
+
         private Realm realm;
-        private ManualResetEventSlim exitRequested = new ManualResetEventSlim();
+
+        private readonly ManualResetEventSlim exitRequested = new ManualResetEventSlim();
 
         public static Realm GetRealmInstance() => Realm.GetInstance("test.realm");
 
@@ -158,7 +166,6 @@ namespace RealmStructureTest
         public void Exit()
         {
             exitRequested.Set();
-
         }
 
         private void Update()
@@ -173,7 +180,7 @@ namespace RealmStructureTest
         }
 
         public void WaitForExit() => exitRequested.Wait();
-        
+
         public void Schedule(Action action) => scheduledActions.Push(action);
 
         public void ScheduleRealm(Action<Realm> action) => scheduledActions.Push(() => action(realm));
