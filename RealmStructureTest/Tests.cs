@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using Realms;
+using Realms.Utils;
 
 namespace RealmStructureTest
 {
@@ -211,9 +212,57 @@ namespace RealmStructureTest
             game.ExitAndWait();
 
             logTime("filter completed");
-            
+
             var localThreadRealm = game.GetGameRealm();
             var filtered = localThreadRealm.ResolveReference(threadSafeFiltered).AsEnumerable().Where(b => isInRange(b.Difficulty)).ToList();
+
+            logTime("filter resolved to list");
+
+            Console.WriteLine($"post filter results: {filtered.Count()}");
+
+            logTime("filter count completed");
+
+            logTime($"sum filtered difficulties (backed): {filtered.Sum(f => f.Difficulty)}");
+            logTime($"sum filtered difficulties (unbacked): {filtered.Sum(f => f.DifficultyUnbacked)}");
+
+            filtered = filtered.ToList();
+            logTime("convert to list");
+
+            logTime($"sum filtered difficulties (backed): {filtered.Sum(f => f.Difficulty)}");
+            logTime($"sum filtered difficulties (unbacked): {filtered.Sum(f => f.DifficultyUnbacked)}");
+        }
+
+        [Test]
+        public void TestSongSelectLoadFilterFlowClone()
+        {
+            var game = new Game();
+
+            const int beatmap_count = 1_000_000;
+
+            game.ScheduleRealmWrite(r => performBulkWrite(r, beatmap_count));
+
+            logTime("bulk write completed");
+
+            int foundCount = game.ScheduleRealm(r => r.All<BeatmapInfo>().Count());
+            Assert.AreEqual(beatmap_count, foundCount);
+
+            logTime("count lookup completed");
+
+            var filtered = game.ScheduleRealm(r =>
+            {
+                // BeatmapCarousel currently does this on BDL.
+                // as long as we are retrieving the IQueryable/IEnumerable this is a free query, so unnecessary to async it.
+                var usableBeatmaps = r.All<BeatmapInfo>().Where(b => !b.DeletePending);
+
+                // current filter logic is run synchronously
+                return usableBeatmaps.ToList().Select(b => (BeatmapInfo)b.Clone()).ToList();
+            });
+
+            game.ExitAndWait();
+
+            logTime("filter completed");
+
+            filtered = filtered.Where(b => isInRange(b.Difficulty)).ToList();
 
             logTime("filter resolved to list");
 
