@@ -13,7 +13,7 @@ namespace RealmStructureTest
         [Test]
         public void TestBasicWrite()
         {
-            var realm = Game.GetRealmInstance();
+            var realm = Game.GetFreshRealmInstance();
             performBasicWrite(realm);
             performBasicRead(realm);
         }
@@ -21,7 +21,7 @@ namespace RealmStructureTest
         [Test]
         public void TestFreezeFromOtherThreadFails()
         {
-            var realm = Game.GetRealmInstance();
+            var realm = Game.GetFreshRealmInstance();
             var reset = new ManualResetEventSlim();
 
             Task.Run(() =>
@@ -51,7 +51,10 @@ namespace RealmStructureTest
         [Test]
         public async Task TestWriteWithAsyncOperationInBetweenFails()
         {
-            var realm = Game.GetRealmInstance();
+            var realm = Game.GetFreshRealmInstance();
+
+            performBasicWrite(realm);
+
             Assert.Greater(realm.All<BeatmapInfo>().Count(), 0);
 
             // performing an await here will start a state machine
@@ -86,32 +89,37 @@ namespace RealmStructureTest
         public void TestAsyncViaSubscription()
         {
             var game = new Game();
+            int retrievedCount = 0;
 
             game.ScheduleRealm(realm =>
             {
-                performBasicWrite(realm);
+                performBulkWrite(realm, 1000);
 
-                realm.All<BeatmapInfo>()
-                    .Where(o => true /* expensive lookup here */)
-                    .SubscribeForNotifications((sender, changes, error) =>
-                    {
-                        performBasicRead(realm);
+                var query = realm.All<BeatmapInfo>().Where(o => true /* expensive lookup here */);
 
-                        // scheduled to GameBase automatically.
-                        game.Exit();
-                    });
+                query.SubscribeForNotifications((sender, changes, error) =>
+                {
+                    retrievedCount = query.Count();
+
+                    // scheduled to GameBase automatically.
+                    game.Exit();
+                });
             });
 
             game.WaitForExit();
+
+            Assert.AreEqual(1000, retrievedCount);
         }
 
         private void performBulkWrite(Realm realm, int count = 100000)
         {
+            // var threadLocalRealm = Realm.GetInstance(realm.Config);
+
             var transaction = realm.BeginWrite();
-            
+
             for (int i = 0; i < count; i++)
                 realm.Add(new BeatmapInfo($"test-{count}"));
-            
+
             transaction.Commit();
             realm.Refresh();
         }
@@ -161,7 +169,9 @@ namespace RealmStructureTest
 
         private readonly ManualResetEventSlim exitRequested = new ManualResetEventSlim();
 
-        public static Realm GetRealmInstance() => Realm.GetInstance("test.realm");
+        public Realm GetGameRealm() => Realm.GetInstance(realm.Config);
+
+        public static Realm GetFreshRealmInstance() => Realm.GetInstance($"test_{Guid.NewGuid()}");
 
         public Game()
         {
@@ -181,7 +191,7 @@ namespace RealmStructureTest
         private void Update()
         {
             // must be initialised on the update thread
-            realm ??= GetRealmInstance();
+            realm ??= GetFreshRealmInstance();
 
             while (scheduledActions.TryPop(out var action))
                 action();
