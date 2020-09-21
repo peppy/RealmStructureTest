@@ -111,10 +111,26 @@ namespace RealmStructureTest
             Assert.AreEqual(1000, retrievedCount);
         }
 
+        /// <summary>
+        /// Aims to test how lazer loads and filters beatmaps for song select in its *current state*.
+        /// This may not be optimal for realm, but can be used as a baseline and benchmark.
+        /// </summary>
+        /// <remarks>
+        /// - SongSelect loads BeatmapCarousel asynchronously.
+        /// - BeatmapCarousel loads all beatmaps into a local list in its BDL.
+        /// - FilterControl applies filter conditions (recursively down the CarouselItem tree) synchronously on any change.
+        /// </remarks>
+        [Test]
+        public void TestSongSelectLoadFilterFlow()
+        {
+            var game = new Game();
+
+
+            game.Exit();
+        }
+
         private void performBulkWrite(Realm realm, int count = 100000)
         {
-            // var threadLocalRealm = Realm.GetInstance(realm.Config);
-
             var transaction = realm.BeginWrite();
 
             for (int i = 0; i < count; i++)
@@ -161,11 +177,11 @@ namespace RealmStructureTest
     /// <summary>
     /// Represents OsuGame.
     /// </summary>
-    public class Game
+    public class Game : UpdateableComponent
     {
-        private readonly ConcurrentStack<Action> scheduledActions = new ConcurrentStack<Action>();
-
         private Realm realm;
+
+        private readonly ConcurrentBag<UpdateableComponent> components = new ConcurrentBag<UpdateableComponent>();
 
         private readonly ManualResetEventSlim exitRequested = new ManualResetEventSlim();
 
@@ -188,22 +204,38 @@ namespace RealmStructureTest
             exitRequested.Set();
         }
 
-        private void Update()
+        public void Add(UpdateableComponent component) => components.Add(component);
+
+        public override void Update()
         {
             // must be initialised on the update thread
             realm ??= GetFreshRealmInstance();
 
-            while (scheduledActions.TryPop(out var action))
-                action();
+            base.Update();
+
+            foreach (var c in components)
+                c.Update();
 
             realm.Refresh();
         }
 
+        public void ScheduleRealm(Action<Realm> action) => Schedule(() => action(realm));
+
         public void WaitForExit() => exitRequested.Wait();
+    }
+
+    public abstract class UpdateableComponent
+    {
+        private readonly ConcurrentStack<Action> scheduledActions = new ConcurrentStack<Action>();
 
         public void Schedule(Action action) => scheduledActions.Push(action);
 
-        public void ScheduleRealm(Action<Realm> action) => scheduledActions.Push(() => action(realm));
+
+        public virtual void Update()
+        {
+            while (scheduledActions.TryPop(out var action))
+                action();
+        }
     }
 
     public class TestSynchronizationContext : SynchronizationContext
