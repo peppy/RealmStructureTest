@@ -125,8 +125,14 @@ namespace RealmStructureTest
         {
             var game = new Game();
 
+            const int beatmap_count = 1_000_000;
 
-            game.Exit();
+            game.ScheduleRealmWrite(r => performBulkWrite(r, beatmap_count));
+
+            int foundCount = game.ScheduleRealm(r => r.All<BeatmapInfo>().Count());
+            Assert.AreEqual(beatmap_count, foundCount);
+
+            game.ExitAndWait();
         }
 
         private void performBulkWrite(Realm realm, int count = 100000)
@@ -137,7 +143,6 @@ namespace RealmStructureTest
                 realm.Add(new BeatmapInfo($"test-{count}"));
 
             transaction.Commit();
-            realm.Refresh();
         }
 
         private void performBasicWrite(Realm realm)
@@ -145,7 +150,6 @@ namespace RealmStructureTest
             var transaction = realm.BeginWrite();
             realm.Add(new BeatmapInfo("test1"));
             transaction.Commit();
-            realm.Refresh();
         }
 
         private void performBasicRead(Realm realm)
@@ -199,41 +203,80 @@ namespace RealmStructureTest
             mainThread.Start();
         }
 
+        public void ExitAndWait()
+        {
+            Exit();
+            WaitForExit();
+        }
+
         public void Exit()
         {
-            exitRequested.Set();
+            Schedule(() => exitRequested.Set());
         }
 
         public void Add(UpdateableComponent component) => components.Add(component);
 
         public override void Update()
         {
-            // must be initialised on the update thread
-            realm ??= GetFreshRealmInstance();
+            while (true)
+            {
+                // must be initialised on the update thread
+                realm ??= GetFreshRealmInstance();
 
-            base.Update();
+                base.Update();
 
-            foreach (var c in components)
-                c.Update();
+                foreach (var c in components)
+                    c.Update();
 
-            realm.Refresh();
+                realm.Refresh();
+            }
+
+            // ReSharper disable once FunctionNeverReturns
         }
 
         public void ScheduleRealm(Action<Realm> action) => Schedule(() => action(realm));
+
+        public void ScheduleRealmWrite(Action<Realm> action)
+        {
+            Schedule(() =>
+            {
+                action(realm);
+
+                // would usually happen on the next update frame.
+                // this is just to simplify the writing of tests.
+                realm.Refresh();
+            });
+        }
+
+        public T ScheduleRealm<T>(Func<Realm, T> action)
+        {
+            T val = default;
+
+            var reset = new ManualResetEventSlim();
+
+            Schedule(() =>
+            {
+                val = action(realm);
+                reset.Set();
+            });
+
+            reset.Wait();
+
+            return val;
+        }
 
         public void WaitForExit() => exitRequested.Wait();
     }
 
     public abstract class UpdateableComponent
     {
-        private readonly ConcurrentStack<Action> scheduledActions = new ConcurrentStack<Action>();
+        private readonly ConcurrentQueue<Action> scheduledActions = new ConcurrentQueue<Action>();
 
-        public void Schedule(Action action) => scheduledActions.Push(action);
-
+        public void Schedule(Action action) => scheduledActions.Enqueue(action);
 
         public virtual void Update()
         {
-            while (scheduledActions.TryPop(out var action))
+            while (scheduledActions.TryDequeue(out var action))
                 action();
         }
     }
