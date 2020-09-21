@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,6 +11,15 @@ namespace RealmStructureTest
 {
     public class Tests
     {
+        private Stopwatch sw;
+
+        [SetUp]
+        public void Setup()
+        {
+            sw = new Stopwatch();
+            sw.Start();
+        }
+
         [Test]
         public void TestBasicWrite()
         {
@@ -129,11 +139,64 @@ namespace RealmStructureTest
 
             game.ScheduleRealmWrite(r => performBulkWrite(r, beatmap_count));
 
+            logTime("bulk write completed");
+
             int foundCount = game.ScheduleRealm(r => r.All<BeatmapInfo>().Count());
             Assert.AreEqual(beatmap_count, foundCount);
 
+            logTime("count lookup completed");
+
+            var filtered = game.ScheduleRealm(r =>
+            {
+                // BeatmapCarousel currently does this on BDL.
+                // as long as we are retrieving the IQueryable/IEnumerable this is a free query, so unnecessary to async it.
+                var usableBeatmaps = r.All<BeatmapInfo>().Where(b => !b.DeletePending);
+
+                // just here for testing purposes (so we can run queries below outside the game context)
+                usableBeatmaps = usableBeatmaps.Freeze();
+                
+                
+
+                // current filter logic is run synchronously
+                var filteredBeatmaps = usableBeatmaps.AsEnumerable().Where(b => isInRange(b.Difficulty)).ToList();
+
+                return filteredBeatmaps;
+            });
+
             game.ExitAndWait();
+            
+            logTime("filter completed");
+
+            Console.WriteLine($"post filter results: {filtered.Count()}");
+
+            logTime("filter count completed");
+
+            logTime($"sum filtered difficulties (backed): {filtered.Sum(f => f.Difficulty)}");
+            logTime($"sum filtered difficulties (unbacked): {filtered.Sum(f => f.DifficultyUnbacked)}");
+
+            filtered = filtered.ToList();
+            logTime("convert to list");
+
+            logTime($"sum filtered difficulties (backed): {filtered.Sum(f => f.Difficulty)}");
+            logTime($"sum filtered difficulties (unbacked): {filtered.Sum(f => f.DifficultyUnbacked)}");
+
         }
+
+        private long lastLogTime;
+
+        private void logTime(string text)
+        {
+            var newLogTime = sw.ElapsedMilliseconds;
+
+            Console.WriteLine($"{newLogTime.ToString().PadRight(10)} ({(newLogTime - lastLogTime).ToString().PadRight(10)}): {text}");
+
+            lastLogTime = newLogTime;
+        }
+
+        /// <summary>
+        /// Sample filter method which likely can't be performed via IQueryable
+        /// </summary>
+        private bool isInRange(double value) => value > 5 && value < 8;
 
         private void performBulkWrite(Realm realm, int count = 100000)
         {
@@ -166,11 +229,26 @@ namespace RealmStructureTest
     /// </summary>
     public class BeatmapInfo : RealmObject
     {
+        private static int deleted;
+
         public string Title { get; set; }
+
+        public bool DeletePending { get; set; }
+
+        public double DifficultyUnbacked = rng.NextDouble() * 10;
+
+        public double Difficulty { get; set; }
+
+        private static readonly Random rng = new Random();
 
         public BeatmapInfo(string title)
         {
             Title = title;
+
+            // for testing, one in ten beatmaps will be pending deletion.
+            DeletePending = deleted++ % 10 == 0;
+
+            Difficulty = rng.NextDouble() * 10;
         }
 
         public BeatmapInfo()
@@ -238,6 +316,8 @@ namespace RealmStructureTest
 
         public void ScheduleRealmWrite(Action<Realm> action)
         {
+            var reset = new ManualResetEventSlim();
+
             Schedule(() =>
             {
                 action(realm);
@@ -245,7 +325,11 @@ namespace RealmStructureTest
                 // would usually happen on the next update frame.
                 // this is just to simplify the writing of tests.
                 realm.Refresh();
+
+                reset.Set();
             });
+
+            reset.Wait();
         }
 
         public T ScheduleRealm<T>(Func<Realm, T> action)
