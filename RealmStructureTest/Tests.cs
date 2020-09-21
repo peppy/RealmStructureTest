@@ -10,47 +10,39 @@ namespace RealmStructureTest
 {
     public class Tests
     {
-        private Realm realm;
-
-        [SetUp]
-        public void Setup()
-        {
-            realm = Realm.GetInstance("test.realm");
-
-            performBasicWrite();
-
-            realm.Refresh();
-        }
-
         [Test]
         public void TestBasicWrite()
         {
-            performBasicRead();
+            var realm = Game.GetRealmInstance();
+            performBasicWrite(realm);
+            performBasicRead(realm);
         }
 
+        /// <summary>
+        /// This tests an asynchronous realm query using IQueryable.
+        /// The callback will be run in the game thread context (on next realm.Refresh call).
+        /// </summary>
         [Test]
-        public void TestAsyncLookup()
+        public void TestAsyncViaSubscription()
         {
-            var reset = new ManualResetEventSlim();
+            var game = new Game();
 
-            realm.All<BeatmapInfo>().Where(o => true /* expensive lookup */).SubscribeForNotifications((sender, changes, error) =>
+            game.ScheduleRealm(realm =>
             {
-                // scheduled to GameBase automatically.
-                reset.Set();
+                realm.All<BeatmapInfo>().Where(o => true /* expensive lookup */).SubscribeForNotifications((sender, changes, error) =>
+                {
+                    // scheduled to GameBase automatically.
+                    game.Exit();
+                });
             });
 
-            while (true)
-            {
-                realm.Refresh();
-
-                if (reset.IsSet)
-                    break;
-            }
+            game.WaitForExit();
         }
 
         [Test]
         public void TestFreezeFromOtherThread()
         {
+            var realm = Game.GetRealmInstance();
             var reset = new ManualResetEventSlim();
 
             Task.Run(() =>
@@ -80,35 +72,43 @@ namespace RealmStructureTest
         [Test]
         public async Task TestWriteWithAsyncOperationInBetween()
         {
+            var realm = Game.GetRealmInstance();
             Assert.Greater(realm.All<BeatmapInfo>().Count(), 0);
-            var reset = new ManualResetEventSlim();
 
             // performing an await here will start a state machine
             // we can't be guaranteed to return to the original thread the realm is bound to.
-            await Task.Run(performBasicRead);
-
-            // as a result, this will throw.
-            // this can be avoided by creating a custom SynchronizationContext.
-            // we should investigate this further if it's decided that we want to use async in more places.
-            performBasicRead();
-
-            while (true)
+            await Task.Run(() =>
             {
-                realm.Refresh();
-                if (reset.IsSet)
-                    break;
+                /* this doesn't need to be realm work for a failure */
+            });
+
+            Exception thrown = null;
+            
+            try
+            {
+                // as a result, this will throw.
+                // this can be avoided by creating a custom SynchronizationContext.
+                // we should investigate this further if it's decided that we want to use async in more places.
+                performBasicRead(realm);
             }
+            catch (Exception e)
+            {
+                thrown = e;
+            }
+
+            Assert.NotNull(thrown);
         }
 
-        private void performBasicWrite()
+        private void performBasicWrite(Realm realm)
         {
             var transaction = realm.BeginWrite();
             realm.Add(new BeatmapInfo("test1"));
             transaction.Commit();
+            realm.Refresh();
         }
 
 
-        private void performBasicRead()
+        private void performBasicRead(Realm realm)
         {
             Assert.Greater(realm.All<BeatmapInfo>().Count(), 0);
 
@@ -140,12 +140,13 @@ namespace RealmStructureTest
     public class Game
     {
         private readonly ConcurrentStack<Action> scheduledActions = new ConcurrentStack<Action>();
-        private readonly Realm realm;
+        private Realm realm;
+        private ManualResetEventSlim exitRequested = new ManualResetEventSlim();
+
+        public static Realm GetRealmInstance() => Realm.GetInstance("test.realm");
 
         public Game()
         {
-            realm = Realm.GetInstance("test.realm");
-
             var mainThread = new Thread(Update)
             {
                 IsBackground = true
@@ -154,13 +155,28 @@ namespace RealmStructureTest
             mainThread.Start();
         }
 
+        public void Exit()
+        {
+            exitRequested.Set();
+
+        }
+
         private void Update()
         {
+            // must be initialised on the update thread
+            realm ??= GetRealmInstance();
+
             while (scheduledActions.TryPop(out var action))
                 action();
 
             realm.Refresh();
         }
+
+        public void WaitForExit() => exitRequested.Wait();
+        
+        public void Schedule(Action action) => scheduledActions.Push(action);
+
+        public void ScheduleRealm(Action<Realm> action) => scheduledActions.Push(() => action(realm));
     }
 
     public class TestSynchronizationContext : SynchronizationContext
